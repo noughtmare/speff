@@ -38,7 +38,7 @@ import           System.IO.Unsafe       (unsafePerformIO)
 
 -- | The kind of higher-order effects, parameterized by (1) the monad in which it was performed, and (2) the result
 -- type.
-type Effect = (Type -> Type) -> Type -> Type
+type Effect = (Type -> Type) -> Type
 
 -- | The concrete representation of an effect context: a record of internal handler representations.
 type Env = Rec InternalHandler
@@ -53,7 +53,7 @@ newtype Eff (es :: [Effect]) (a :: Type) = Eff { unEff :: Env es -> Ctl a }
 -- context in which the effect was introduced.
 type role InternalHandler nominal
 newtype InternalHandler e = InternalHandler
-  { runHandler :: ∀ es a. e :> es => e (Eff es) a -> Eff es a }
+  { runHandler :: ∀ es. e :> es => e (Eff es) }
 
 instance Functor (Eff es) where
   fmap = liftM
@@ -88,7 +88,7 @@ withHandling :: ∀ esSend es r a. Handling esSend es r => (HandlingDict es r ->
 withHandling f = f (handlingDict @esSend)
 
 -- | A handler of effect @e@ introduced in context @es@ over a computation returning @r@.
-type Handler e es r = ∀ esSend a. Handling esSend es r => e :> esSend => e (Eff esSend) a -> Eff esSend a
+type Handler e es r = ∀ esSend. Handling esSend es r => e :> esSend => e (Eff esSend)
 
 -- | This "unsafe" @IO@ function is perfectly safe in the sense that it won't panic or otherwise cause undefined
 -- behaviors; it is only unsafe when it is used to embed arbitrary @IO@ actions in any effect environment,
@@ -105,9 +105,10 @@ unsafeState x0 f = Eff \es -> promptState x0 \ref -> unEff (f ref) es
 
 -- | Convert an effect handler into an internal representation with respect to a certain effect context and prompt
 -- frame.
-toInternalHandler :: ∀ e es r. Marker r -> Env es -> Handler e es r -> InternalHandler e
-toInternalHandler mark es hdl = InternalHandler \(e :: e (Eff esSend) a) ->
-  reflectDict @(Handling esSend es r) hdl (Handling es mark) e
+toInternalHandler :: ∀ e es r. Marker r -> Rec InternalHandler es -> Handler e es r -> InternalHandler e
+toInternalHandler mark es hdl = InternalHandler x where
+    x :: forall esSend. e :> esSend => e (Eff esSend)
+    x = reflectDict @(Handling esSend es r) hdl (Handling es mark)
 
 -- | Do a trivial transformation over the effect context.
 alter :: (Env es' -> Env es) -> Eff es a -> Eff es' a
@@ -119,8 +120,8 @@ handle :: (InternalHandler e -> Env es' -> Env es) -> Handler e es' a -> Eff es 
 handle f = \hdl (Eff m) -> Eff \es -> prompt \mark -> m $! f (toInternalHandler mark es hdl) es
 
 -- | Perform an effect operation.
-send :: e :> es => e (Eff es) a -> Eff es a
-send e = Eff \es -> unEff (runHandler (Rec.index es) e) es
+send :: e :> es => (e (Eff es) -> Eff es a) -> Eff es a
+send f = Eff \es -> unEff (f (runHandler (Rec.index es))) es
 {-# INLINE send #-}
 
 -- | A "localized computaton"; this should be parameterized with an existential variable so the computation with this

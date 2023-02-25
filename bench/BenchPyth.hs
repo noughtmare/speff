@@ -24,7 +24,7 @@ programSp upbound = do
   x <- S.choice [1..upbound]
   y <- S.choice [1..upbound]
   z <- S.choice [1..upbound]
-  if x*x + y*y == z*z then return (x,y,z) else S.send S.Empty
+  if x*x + y*y == z*z then return (x,y,z) else empty
 {-# NOINLINE programSp #-}
 
 pythSp :: Int -> [(Int, Int, Int)]

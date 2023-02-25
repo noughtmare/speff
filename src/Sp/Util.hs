@@ -32,46 +32,48 @@ module Sp.Util
 import           Control.Applicative (Alternative (empty, (<|>)))
 import           Data.Atomics        (atomicModifyIORefCAS, atomicModifyIORefCAS_)
 import           Data.IORef          (IORef, readIORef, writeIORef)
-import           Data.Kind           (Type)
 import           Sp.Internal.Env     ((:>))
 import           Sp.Internal.Handle
 import           Sp.Internal.Monad
 
 -- | Provides an environment value of type @r@, and you can override it in a local scope.
-data Reader (r :: Type) :: Effect where
-  Ask :: Reader r m r
-  Local :: (r -> r) -> m a -> Reader r m a
+data Reader r m = Reader
+  { ask_ :: m r
+  , local_ :: forall a. (r -> r) -> m a -> m a
+  }
 
 -- | Obtain the environment value.
 ask :: Reader r :> es => Eff es r
-ask = send Ask
+ask = send \r -> ask_ r
 
 -- | Override the environment value in a local scope.
 local :: Reader r :> es => (r -> r) -> Eff es a -> Eff es a
-local f m = send (Local f m)
+local f m = send \r -> local_ r f m
 
 handleReader :: r -> Handler (Reader r) es a
-handleReader !r = \case
-  Ask       -> pure r
-  Local f m -> interpose (handleReader (f r)) m
+handleReader !r = Reader
+  { ask_   =         pure r
+  , local_ = \f m -> interpose (handleReader (f r)) m
+  }
 
 -- | Run the 'Reader' effect with an environment value.
 runReader :: r -> Eff (Reader r : es) a -> Eff es a
 runReader r = interpret (handleReader r)
 
 -- | Provides a mutable state of type @s@.
-data State s :: Effect where
-  Get :: State s m s
-  Put :: s -> State s m ()
-  State :: (s -> (s, a)) -> State s m a
+data State s m = State
+  { get_ :: m s
+  , put_ :: s -> m ()
+  , state_ :: forall a. (s -> (s, a)) -> m a
+  }
 
 -- | Get the mutable state.
 get :: State s :> es => Eff es s
-get = send Get
+get = send \r -> get_ r
 
 -- | Write a new value to the mutable state.
 put :: State s :> es => s -> Eff es ()
-put x = send (Put x)
+put x = send \r -> put_ r x
 
 -- | Apply a function to the mutable state.
 modify :: State s :> es => (s -> s) -> Eff es ()
@@ -80,13 +82,14 @@ modify f = state ((, ()) . f)
 -- | Apply a function of type @s -> (s, a)@ on the mutable state, using the returned @s@ as the new state and
 -- returning the @a@.
 state :: State s :> es => (s -> (s, a)) -> Eff es a
-state f = send (State f)
+state f = send \r -> state_ r f
 
 handleState :: IORef s -> Handler (State s) es a
-handleState r = \case
-  Get     -> unsafeIO (readIORef r)
-  Put s   -> unsafeIO (writeIORef r s)
-  State f -> unsafeIO (atomicModifyIORefCAS r f)
+handleState r = State
+  { get_   =       unsafeIO (readIORef r)
+  , put_   = \s -> unsafeIO (writeIORef r s)
+  , state_ = \f -> unsafeIO (atomicModifyIORefCAS r f)
+  }
 
 -- | Run the 'State' effect with an initial value for the mutable state.
 runState :: s -> Eff (State s : es) a -> Eff es (a, s)
@@ -96,52 +99,56 @@ runState s m = unsafeState s \r -> do
   pure (x, s')
 
 -- | Allows you to throw error values of type @e@ and catching these errors too.
-data Error (e :: Type) :: Effect where
-  Throw :: e -> Error e m a
-  Try :: m a -> Error e m (Either e a)
+data Error e m = Error
+  { throw_ :: forall a. e -> m a
+  , try_ :: forall a. m a -> m (Either e a)
+  }
 
 -- | Throw an error.
 throw :: Error e :> es => e -> Eff es a
-throw e = send (Throw e)
+throw e = send \r -> throw_ r e
 
 -- | Catch any error thrown by a computation and return the result as an 'Either'.
 try :: Error e :> es => Eff es a -> Eff es (Either e a)
-try m = send (Try m)
+try m = send \r -> try_ r m
 
 -- | Catch any error thrown by a computation and handle it with a function.
 catch :: Error e :> es => Eff es a -> (e -> Eff es a) -> Eff es a
 catch m h = try m >>= either h pure
 
 handleError :: ∀ e es a. Handler (Error e) es (Either e a)
-handleError = \case
-  Throw e -> abort (pure $ Left e)
-  Try m   -> interpose (handleError @e) (Right <$> m)
+handleError = Error
+  { throw_ = \e -> abort (pure $ Left e)
+  , try_   = \m -> interpose (handleError @e) (Right <$> m)
+  }
 
 -- | Run the 'Error' effect. If there is any unhandled error, it is returned as a 'Left'.
 runError :: ∀ e es a. Eff (Error e : es) a -> Eff es (Either e a)
 runError = interpret (handleError @e) . fmap Right
 
 -- | Provides an append-only state, and also allows you to record what is appended in a specific scope.
-data Writer (w :: Type) :: Effect where
-  Tell :: w -> Writer w m ()
-  Listen :: m a -> Writer w m (a, w)
+data Writer w m = Writer
+  { tell_ :: w -> m ()
+  , listen_ :: forall a. m a -> m (a, w)
+  }
 
 -- | Append a value to the state.
 tell :: Writer w :> es => w -> Eff es ()
-tell x = send (Tell x)
+tell x = send \r -> tell_ r x
 
 -- | Record what is appended in a specific scope.
 listen :: Writer w :> es => Eff es a -> Eff es (a, w)
-listen m = send (Listen m)
+listen m = send \r -> listen_ r m
 
 handleWriter :: ∀ w es a. Monoid w => IORef w -> Handler (Writer w) es a
-handleWriter r = \case
-  Tell x   -> unsafeIO (atomicModifyIORefCAS_ r (<> x))
-  Listen m -> unsafeState mempty \r' -> do
+handleWriter r = Writer
+  { tell_   = \x -> unsafeIO (atomicModifyIORefCAS_ r (<> x))
+  , listen_ = \m -> unsafeState mempty \r' -> do
     x <- interpose (handleWriter r') m
     w' <- unsafeIO (readIORef r')
     unsafeIO $ atomicModifyIORefCAS_ r (<> w')
     pure (x, w')
+  }
 {-# INLINABLE handleWriter #-}
 
 -- | Run the 'Writer' state, with the append-only state as a monoidal value.
@@ -153,23 +160,25 @@ runWriter m = unsafeState mempty \r -> do
 {-# INLINABLE runWriter #-}
 
 -- | Provides nondeterministic choice.
-data NonDet :: Effect where
-  Empty :: NonDet m a
-  Choice :: [a] -> NonDet m a
+data NonDet m = Nondet
+  { empty_ :: forall a. m a
+  , choice_ :: forall a. [a] -> m a
+  }
 
 -- | Nondeterministic choice.
 choice :: NonDet :> es => [a] -> Eff es a
-choice etc = send (Choice etc)
+choice etc = send \r -> choice_ r etc
 
 handleNonDet :: Alternative f => Handler NonDet es (f a)
-handleNonDet = \case
-  Empty -> abort $ pure empty
-  Choice etc -> control \cont ->
+handleNonDet = Nondet
+  { empty_  =         abort $ pure empty
+  , choice_ = \etc -> control \cont ->
     let collect [] acc = pure acc
         collect (e : etc') acc = do
           xs <- cont (pure e)
           collect etc' $! (acc <|> xs)
     in collect etc empty
+  }
 {-# INLINABLE handleNonDet #-}
 
 -- | Run the 'NonDet' effect, with the nondeterministic choice provided by an 'Alternative' instance.
@@ -178,7 +187,7 @@ runNonDet = interpret handleNonDet . fmap pure
 {-# INLINABLE runNonDet #-}
 
 instance NonDet :> es => Alternative (Eff es) where
-  empty = send Empty
+  empty = send empty_
   m <|> n = do
-    x <- send (Choice [True, False])
+    x <- send \r -> choice_ r [True, False]
     if x then m else n
